@@ -1,11 +1,14 @@
 using System.Globalization;
 using HarmonyLib;
 using NeoModLoader.api.exceptions;
+using NeoModLoader.constants;
 using NeoModLoader.services;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.U2D;
 using Object = UnityEngine.Object;
+using NeoModLoader.utils.Sounds;
+using Patches = NeoModLoader.utils.Sounds.Patches;
 
 namespace NeoModLoader.utils;
 
@@ -40,7 +43,10 @@ public static class ResourcesPatch
 
     internal static void Initialize()
     {
-        CustomAudioManager.Initialize();
+        AssetManager._instance.add(SoundLibrary.MainLibrary = new SoundLibrary(),"CustomAudio");
+        Harmony.CreateAndPatchAll(typeof(Patches), Others.harmony_id);
+        FMODHelper.InitFMOD();
+        
         tree = new ResourceTree();
         SpriteAtlas atlas = Resources.FindObjectsOfTypeAll<SpriteAtlas>()
             .FirstOrDefault(x => x.name == "SpriteAtlasUI");
@@ -82,27 +88,18 @@ public static class ResourcesPatch
         };
     }
     /// <summary>
-    /// doesnt return anything, simply adds the wav to the wav library that contains all the custom sounds
+    /// simply adds the sound to the sounds library that contains all the custom sounds
     /// </summary>
-    private static void LoadWavFile(string abspath, string path)
+    private static void LoadSoundFile(string abspath, string path)
     {
-        if (CustomAudioManager.AudioWavLibrary.ContainsKey(path))
-        {
-            LogService.LogError($"The Sound file {path} has already been loaded!");
-            return;
+        string JsonPath = File.ReadAllText(Path.GetDirectoryName(abspath) + "/" + Path.GetFileNameWithoutExtension(abspath) + ".json");
+        if(!SoundFilePlayer.ReadFromFile(JsonPath, out var player)){
+            player.WriteToFile(JsonPath);
         }
-        WavContainer container;
-        try
-        {
-            container = JsonConvert.DeserializeObject<WavContainer>(
-                File.ReadAllText(Path.GetDirectoryName(abspath) + "/" + Path.GetFileNameWithoutExtension(abspath) + ".json"));
-            container.Path = abspath;
-        }
-        catch (Exception)
-        {
-            container = new WavContainer(abspath, SoundMode.Stereo3D, 50f);
-        }
-        CustomAudioManager.AudioWavLibrary.Add(path, container);
+        player.GenerateSound(abspath);
+        string Name;
+        Name = int.TryParse(Path.GetFileName(path), out int Index) ? Path.GetDirectoryName(path) : path;
+        SoundLibrary.MainLibrary.CheckID(Name).Players.Add(Index, player);
     }
 
     private static TextAsset LoadTextAsset(string path)
@@ -316,6 +313,10 @@ public static class ResourcesPatch
             node.objects[Path.GetFileNameWithoutExtension(lower_path)] = obj;
         }
 
+        public static bool IsSoundFile(string Extention)
+        {
+            return Extention is ".wav" or ".ogg" or ".mp3";
+        }
          /// <summary>
         /// Load resources under absPath, and patch them to the tree under the folder of path.
         /// </summary>
@@ -326,12 +327,13 @@ public static class ResourcesPatch
         {
             string lower_path = path.ToLower();
             if (lower_path.EndsWith(".meta") || lower_path.EndsWith("sprites.json")) return;
-            if (lower_path.EndsWith(".wav"))
+            string Extention = Path.GetExtension(lower_path);
+            if (IsSoundFile(Extention))
             {
-                LoadWavFile(absPath, lower_path.Replace(".wav", ""));
+                LoadSoundFile(absPath, lower_path.Replace(Extention, ""));
                 return;
             }
-            if (Path.GetExtension(lower_path).EndsWith("asset") || Path.GetExtension(lower_path).EndsWith("trait"))
+            if (Extention.EndsWith("asset") || Extention.EndsWith("trait"))
             {
                 Linker.AssetFilePaths.Add(absPath);
                 return;
