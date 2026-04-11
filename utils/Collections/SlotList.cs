@@ -1,10 +1,10 @@
 using System.Collections;
 namespace NeoModLoader.utils.Collections;
 /// <summary>
-/// a list of slots which can contain null or a variable
+/// a list of slots which can contain a variable
 /// </summary>
 /// <remarks>thread safe</remarks>
-public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
+public sealed class SlotList<T> : IList<T>
 {
     private readonly Dictionary<int, T>   _data     = new();
     private readonly Dictionary<int, int> _position = new(); 
@@ -16,17 +16,25 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
 
     private readonly object _lock = new();
     
-    public T GetRandom()
+    public T GetRandom(bool IncludeEmptySlots = false)
     {
+        if (IncludeEmptySlots)
+        {
+            lock (_lock)
+            {
+                int candidate = Randy.randomInt(0, _next);
+                return InternalGet(candidate);
+            }
+        }
+        
         var snap = Volatile.Read(ref _active);
         int c    = Volatile.Read(ref _count);
 
         if (c == 0) throw new InvalidOperationException("Collection is empty.");
-
-        int candidate = snap[Randy.randomInt(0, c)];
-
+        
         lock (_lock)
         {
+            int candidate = snap[Randy.randomInt(0, c)];
             if (_data.TryGetValue(candidate, out var value))
                 return value;
 
@@ -39,10 +47,14 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
     {
         lock (_lock)
         {
-            if (_data.TryGetValue(index, out var value))
-            {
-                return value;
-            }
+            return InternalGet(index);
+        }
+    }
+    T? InternalGet(int index)
+    {
+        if (_data.TryGetValue(index, out var value))
+        {
+            return value;
         }
         return default;
     }
@@ -59,19 +71,22 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
     {
         lock (_lock)
         {
-            if (_data.ContainsKey(index))
-            {
-                _data[index] = value;
-            }
-            else
-            {
-                if (index >= _next) _next = index + 1;
-
-                InsertInternal(index, value);
-            }
+            InternalSet(index, value);
         }
     }
+    void InternalSet(int index, T value)
+    {
+        if (_data.ContainsKey(index))
+        {
+            _data[index] = value;
+        }
+        else
+        {
+            if (index >= _next) _next = index + 1;
 
+            InsertInternal(index, value);
+        }
+    }
     public bool Remove(int index)
     {
         lock (_lock)
@@ -116,6 +131,12 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
         Array.Copy(_active, next, _count);
         Volatile.Write(ref _active, next);
     }
+
+    public void RemoveAt(int index)
+    {
+        Remove(index);
+    }
+
     public T this[int key]
     {
         get => Get(key);
@@ -139,7 +160,50 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
         }
         return false;
     }
+    /// <summary>
+    /// swaps two slots, if the second slot is empty, it just moves the first item
+    /// </summary>
+    /// <returns>true if the first slot is not empty</returns>
+    public bool Swap(int index, int newindex)
+    {
+        lock (_lock)
+        {
+            if (!_data.TryGetValue(index, out var aVal))
+            {
+                return false;
+            }
+          
+            bool newExists = _data.ContainsKey(newindex);
+            _data.TryGetValue(newindex, out var bVal);
 
+            if (!newExists)
+            {
+                RemoveInternal(index);
+                InsertInternal(newindex, aVal!);
+            }
+            else
+            {
+                _data[index]    = bVal!;
+                _data[newindex] = aVal!;
+            }
+            return true;
+        }
+    }
+    /// <summary>
+    /// inserts an item into the slot. if the slot is full, the previous item will be pushed to the next slot
+    /// </summary>
+    public void Insert(int index, T item)
+    {
+        lock (_lock)
+        {
+            if (_data.TryGetValue(index, out var existing))
+            {
+                int newIndex = _free.Count > 0 ? _free.Pop() : _next++;
+                InsertInternal(newIndex, existing);
+            }
+            InternalSet(index, item); 
+        }
+    }
     public int IndexOf(T item)
     {
         lock (_lock)
@@ -155,11 +219,11 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
         return -1;
     }
 
-    public int Count { get { lock (_lock) return _count; } }
+    public int Count { get { lock (_lock) return _next; } }
 
     public bool IsReadOnly => false;
 
-    public ICollection<int> Keys
+    public ICollection<int> Slots
     {
         get { lock (_lock) return _data.Keys.ToList(); }
     }
@@ -168,61 +232,25 @@ public sealed class SlotList<T> : IDictionary<int, T>, ICollection<T>
     {
         get { lock (_lock) return _data.Values.ToList(); }
     }
-
-    public void Add(int key, T value) => Set(key, value);
-
-    void ICollection<KeyValuePair<int, T>>.Add(KeyValuePair<int, T> item)
-        => Set(item.Key, item.Value);
-
-    public bool ContainsKey(int key)
+    
+    public bool IsSlotFull(int key)
     {
         lock (_lock) return _data.ContainsKey(key);
     }
 
-    public bool Contains(KeyValuePair<int, T> item)
-    {
-        lock (_lock)
-            return _data.TryGetValue(item.Key, out var v) &&
-                   Equals(v, item.Value);
-    }
-
-    public bool TryGetValue(int key, out T value)
+    public bool TryReadSlot(int key, out T value)
     {
         lock (_lock) return _data.TryGetValue(key, out value);
     }
-    public bool Remove(KeyValuePair<int, T> item)
+    public IEnumerator<T> GetEnumerator()
     {
-        lock (_lock)
-        {
-            if (!_data.TryGetValue(item.Key, out var v)) return false;
-            if (!Equals(v, item.Value)) return false;
+        int next;
+        lock (_lock) next = _next;
 
-            RemoveInternal(item.Key); 
-            return true;
-        }
+        for (int i = 0; i < next; i++)
+            yield return Get(i); 
     }
-
-    public void CopyTo(KeyValuePair<int, T>[] array, int arrayIndex)
-    {
-        lock (_lock)
-            foreach (var kv in _data)
-                array[arrayIndex++] = kv;
-    }
-
-    IEnumerator<T> IEnumerable<T>.GetEnumerator()
-    {
-        List<T> snapshot;
-        lock (_lock) snapshot = _data.Values.ToList();
-        return snapshot.GetEnumerator();
-    }
-
-    public IEnumerator<KeyValuePair<int, T>> GetEnumerator()
-    {
-        List<KeyValuePair<int, T>> snapshot;
-        lock (_lock) snapshot = _data.ToList();
-        return snapshot.GetEnumerator();
-    }
-
+    
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
     void ICollection<T>.Add(T item)
